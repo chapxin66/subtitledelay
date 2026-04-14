@@ -387,11 +387,27 @@ function renderLoop(){
 }
 renderLoop();
 
+// Fullscreen support: move overlay into the fullscreen element so it stays visible
+function getRoot(){
+  return document.fullscreenElement||document.webkitFullscreenElement||document.body;
+}
+function moveToRoot(){
+  var root=getRoot();
+  [ov,grip,panel].forEach(function(el){
+    if(el.parentNode!==root)root.appendChild(el);
+  });
+  syncGrip();
+}
+document.addEventListener('fullscreenchange',moveToRoot);
+document.addEventListener('webkitfullscreenchange',moveToRoot);
+
 window.__SD={
   active:true,
   destroy:function(){
     run=false;
     clearInterval(findRetry);
+    document.removeEventListener('fullscreenchange',moveToRoot);
+    document.removeEventListener('webkitfullscreenchange',moveToRoot);
     BUF.forEach(function(f){try{f.bmp.close();}catch(e){}});
     [ov,grip,panel].forEach(function(el){
       if(el&&el.parentNode)el.parentNode.removeChild(el);
