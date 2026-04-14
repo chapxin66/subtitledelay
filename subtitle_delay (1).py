@@ -113,6 +113,11 @@ class SubtitleDelayer:
         self._build_overlay()
         self._build_panel()
 
+        # 必须在窗口显示后才能拿到有效 HWND
+        self._root.update()
+        if WINDOWS and CAPTURE_OK:
+            self.wda_ok = self._enable_wda()
+
         self._refresh_badge()
 
         self._tick()
@@ -124,7 +129,7 @@ class SubtitleDelayer:
         ov = tk.Toplevel(self._root)
         ov.overrideredirect(True)
         ov.attributes('-topmost', True)
-        ov.attributes('-alpha', 0.95)
+        ov.attributes('-alpha', 1.0)
         ov.geometry('880x100+20+860')
         ov.configure(bg=C['red'])
         self.ov = ov
@@ -138,7 +143,8 @@ class SubtitleDelayer:
         sh.configure(bg='#000000')
         self._shutter = sh
 
-        self._inner = tk.Frame(ov, bg=C['red'], padx=2, pady=2)
+        # self._inner = tk.Frame(ov, bg=C['red'], padx=2, pady=2)
+        self._inner = tk.Frame(ov, bg=C['red'], padx=0, pady=0)
         self._inner.pack(fill='both', expand=True)
 
         self.cv = tk.Canvas(self._inner, bg=self.block_color,
@@ -218,7 +224,7 @@ class SubtitleDelayer:
                      lambda v: setattr(self, 'delay', float(v)), '秒')
 
         self._sec(p, '遮挡透明度')
-        self.alpha_v = tk.DoubleVar(value=0.95)
+        self.alpha_v = tk.DoubleVar(value=1.0)
         self._slider(p, self.alpha_v, 0.1, 1.0, 0.05,
                      lambda v: self.ov.attributes('-alpha', float(v)))
 
@@ -288,17 +294,23 @@ class SubtitleDelayer:
     def _enable_wda(self):
         try:
             import ctypes
-            GA_ROOT = 2
-            child_hwnd = self.ov.winfo_id()
-            # winfo_id() 返回 tkinter 内部子框架句柄，需要拿真正的顶层窗口句柄
-            hwnd = ctypes.windll.user32.GetAncestor(
-                ctypes.c_void_p(child_hwnd), GA_ROOT
-            ) or child_hwnd
-            ok = ctypes.windll.user32.SetWindowDisplayAffinity(
-                ctypes.c_void_p(hwnd),
-                ctypes.c_uint32(0x00000011)  # WDA_EXCLUDEFROMCAPTURE
-            )
-            return bool(ok)
+            user32 = ctypes.windll.user32
+            # 修复：必须声明返回类型为 c_void_p，否则 64 位 HWND 被截断
+            user32.GetAncestor.restype = ctypes.c_void_p
+            user32.GetAncestor.argtypes = [ctypes.c_void_p, ctypes.c_uint]
+            user32.SetWindowDisplayAffinity.restype = ctypes.c_bool
+            user32.SetWindowDisplayAffinity.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+
+            def set_wda(tk_win):
+                hwnd = user32.GetAncestor(tk_win.winfo_id(), 2)  # GA_ROOT=2
+                if not hwnd:
+                    hwnd = tk_win.winfo_id()
+                return user32.SetWindowDisplayAffinity(hwnd, 0x00000011)
+
+            # 遮挡框和快门都排除在截图之外
+            ok1 = set_wda(self.ov)
+            ok2 = set_wda(self._shutter)
+            return bool(ok1 and ok2)
         except Exception:
             return False
 
@@ -316,34 +328,32 @@ class SubtitleDelayer:
     # ─── 主线程截图（隐藏→截→恢复，避免截到自身）────────────────────────────
 
     def _capture_sync(self):
-        """截图前用快门窗口盖住字幕区域，再隐藏主框截图，用户看不到真实画面。"""
+        """WDA 生效时遮挡框对 mss 不可见，直接截图即可，无需隐藏窗口。"""
         if not self._sct:
             return
-        prev_alpha = 0.95
         try:
             x, y, w, h = self._ov_rect
             if w < 10 or h < 10:
                 return
-            prev_alpha = float(self.ov.attributes('-alpha'))
-            # 1. 快门顶上来（纯黑，用户看不到字幕）
-            self._shutter.geometry(f'{w}x{h}+{x}+{y}')
-            self._shutter.attributes('-alpha', prev_alpha)
-            self._shutter.lift()
-            self._shutter.update()
-            # 2. 主框消失，截取框后面的真实画面
-            self.ov.attributes('-alpha', 0.0)
-            self.ov.update()
-            shot = self._sct.grab({'top': y, 'left': x, 'width': w, 'height': h})
-            img  = Image.frombytes('RGB', shot.size, shot.bgra, 'raw', 'BGRX')
+            if self.wda_ok:
+                # WDA 已排除遮挡框，直接截到真实画面
+                shot = self._sct.grab({'top': y, 'left': x, 'width': w, 'height': h})
+            else:
+                # 降级：快门遮住 → 主框透明 → 截图 → 恢复
+                prev_alpha = float(self.ov.attributes('-alpha'))
+                self._shutter.geometry(f'{w}x{h}+{x}+{y}')
+                self._shutter.attributes('-alpha', prev_alpha)
+                self._shutter.lift()
+                self._shutter.update()
+                self.ov.attributes('-alpha', 0.0)
+                self.ov.update()
+                shot = self._sct.grab({'top': y, 'left': x, 'width': w, 'height': h})
+                self.ov.attributes('-alpha', prev_alpha)
+                self._shutter.attributes('-alpha', 0.0)
+            img = Image.frombytes('RGB', shot.size, shot.bgra, 'raw', 'BGRX')
             self.buf.push(img, time.time())
         except Exception:
             pass
-        finally:
-            try:
-                self.ov.attributes('-alpha', prev_alpha)
-                self._shutter.attributes('-alpha', 0.0)
-            except Exception:
-                pass
 
     # ─── 主渲染循环 ───────────────────────────────────────────────────────────
 
