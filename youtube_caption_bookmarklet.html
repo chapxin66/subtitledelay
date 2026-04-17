@@ -1,0 +1,401 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<title>YouTube 字幕延迟器 - Bookmarklet</title>
+<style>
+  *{box-sizing:border-box;margin:0;padding:0}
+  body{background:#0d1117;color:#c9d1d9;font-family:'Segoe UI',Arial,sans-serif;padding:40px 20px}
+  h1{color:#ff4444;font-size:22px;margin-bottom:6px}
+  h2{color:#58a6ff;font-size:15px;margin:28px 0 10px}
+  .sub{color:#6e7681;font-size:13px;margin-bottom:24px;line-height:1.7}
+  .card{background:#161b22;border:1px solid #30363d;border-radius:10px;padding:20px;margin-bottom:20px;max-width:740px}
+  #bm-link{display:inline-block;background:linear-gradient(135deg,#ff4444,#cc0000);color:#fff;font-size:15px;font-weight:bold;padding:14px 28px;border-radius:8px;text-decoration:none;cursor:grab;box-shadow:0 4px 16px rgba(255,68,68,0.4);user-select:none;border:2px dashed rgba(255,255,255,0.3)}
+  #test-btn{display:inline-block;background:#238636;color:#fff;font-size:14px;font-weight:bold;padding:10px 22px;border-radius:8px;border:none;cursor:pointer;margin-left:16px;vertical-align:middle}
+  ol{padding-left:20px}
+  ol li{margin:8px 0;font-size:14px;line-height:1.7}
+  ol li b{color:#e6edf3}
+  .note{background:#1c2128;border-left:3px solid #d29922;padding:10px 14px;border-radius:0 6px 6px 0;font-size:13px;color:#d29922;margin-top:14px;line-height:1.6}
+  textarea{width:100%;height:80px;background:#0d1117;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:10px;font-family:Consolas,monospace;font-size:11px;resize:none;margin-top:8px}
+  .copy-btn{margin-top:6px;padding:5px 14px;background:#21262d;border:1px solid #30363d;color:#c9d1d9;border-radius:4px;cursor:pointer;font-size:12px}
+  .copy-btn:hover{background:#30363d}
+  details summary::-webkit-details-marker{color:#6e7681}
+</style>
+</head>
+<body>
+
+<h1>&#x25B6; YouTube 字幕延迟器</h1>
+<p class="sub">Canvas 版 &mdash; 读取 DOM 字幕文本，延迟 N 秒后画到 Canvas，无闪烁，无递归，无 Trusted Types 限制。</p>
+
+<div class="card">
+  <h2>安装</h2>
+  <div style="margin-bottom:12px">
+    <a id="bm-link" href="#">&#x25B6; YouTube字幕延迟</a>
+    <button id="test-btn">&#x25B6; 在本页测试</button>
+  </div>
+  <details style="margin-top:12px">
+    <summary style="font-size:12px;color:#6e7681;cursor:pointer">无法拖拽？手动安装</summary>
+    <div style="margin-top:10px">
+      <textarea id="url-box" readonly></textarea>
+      <button class="copy-btn" onclick="copyUrl()">&#x590d;&#x5236; URL</button>
+    </div>
+  </details>
+</div>
+
+<div class="card">
+  <h2>使用方法</h2>
+  <ol>
+    <li>打开 YouTube 视频，<b>先开启字幕</b></li>
+    <li>点击书签栏里的 <b>&#x25B6; YouTube字幕延迟</b></li>
+    <li>把<b>蓝色框</b>拖到视频字幕区域，右下角 <b>&#x25e2;</b> 调整大小</li>
+    <li>等几秒预热后生效，面板可调整延迟时长</li>
+    <li>再次点击书签 &rarr; 关闭</li>
+  </ol>
+  <div class="note">
+    原理：MutationObserver 监听 .ytp-caption-segment 文本变化，带时间戳缓存，N 秒后画到 Canvas。真实字幕用 opacity:0 隐藏。
+  </div>
+</div>
+
+<script id="bm-src" type="text/plain">
+(function(){
+try{
+
+if(window.__YCD&&window.__YCD.active){window.__YCD.destroy();return;}
+
+var DELAY=3000,BUF=[],run=true;
+var captionRoot=null,canvas=null,ctx=null,grip=null,panel=null,mo=null,rafId=null,pollTimer=null,_pendingWaitMo=null;
+var fontSize=22,fontFamily='Arial,sans-serif';
+
+// ── 初始位置：覆盖播放器底部字幕区（与 YouTube 字幕位置对齐）──
+function initPos(){
+  var player=document.querySelector('#movie_player,.html5-video-player');
+  if(player){
+    var r=player.getBoundingClientRect();
+    var h=Math.round(r.height*0.2);
+    h=Math.max(60,Math.min(h,160));
+    var w=Math.round(r.width/2);
+    h=Math.round(h*2/3);h=Math.max(40,h);
+    return{x:r.left+Math.round(r.width/4),y:r.bottom-h-Math.round(r.height*0.05),w:w,h:h};
+  }
+  return{x:Math.max(0,(window.innerWidth-440)/2),y:window.innerHeight-120,w:440,h:60};
+}
+var ip=initPos();
+var OVX=Math.round(ip.x),OVY=Math.round(ip.y),OVW=Math.max(300,Math.round(ip.w)),OVH=Math.max(60,Math.round(ip.h));
+
+// ── Canvas 覆盖层 ──
+canvas=document.createElement('canvas');
+canvas.width=OVW;canvas.height=OVH;
+canvas.style.cssText='position:fixed;z-index:2147483646;cursor:move;display:block;border:2px solid rgba(88,166,255,0.8);border-radius:3px;background:#000;';
+canvas.style.left=OVX+'px';canvas.style.top=OVY+'px';
+canvas.style.width=OVW+'px';canvas.style.height=OVH+'px';
+document.body.appendChild(canvas);
+ctx=canvas.getContext('2d');
+ctx.fillStyle='#111';ctx.fillRect(0,0,OVW,OVH);
+ctx.fillStyle='#555';ctx.font='13px Arial';ctx.textBaseline='middle';
+ctx.fillText('Looking for videos...',12,OVH/2);
+
+// ── 调整大小手柄 ──
+grip=document.createElement('div');
+grip.textContent='\u25e2';
+grip.style.cssText='position:fixed;z-index:2147483647;color:#58a6ff;font-size:14px;cursor:se-resize;line-height:1;user-select:none;pointer-events:auto;';
+document.body.appendChild(grip);
+function syncGrip(){var r=canvas.getBoundingClientRect();grip.style.left=(r.right-16)+'px';grip.style.top=(r.bottom-16)+'px';}
+syncGrip();
+
+// 拖动 canvas
+var dd={};
+canvas.addEventListener('mousedown',function(e){var r=canvas.getBoundingClientRect();dd={on:true,ox:e.clientX-r.left,oy:e.clientY-r.top};e.preventDefault();});
+canvas.addEventListener('touchstart',function(e){var t=e.touches[0],r=canvas.getBoundingClientRect();dd={on:true,ox:t.clientX-r.left,oy:t.clientY-r.top};},{passive:true});
+document.addEventListener('mousemove',function(e){if(!dd.on)return;canvas.style.left=(e.clientX-dd.ox)+'px';canvas.style.top=(e.clientY-dd.oy)+'px';syncGrip();});
+document.addEventListener('touchmove',function(e){if(!dd.on)return;var t=e.touches[0];canvas.style.left=(t.clientX-dd.ox)+'px';canvas.style.top=(t.clientY-dd.oy)+'px';syncGrip();},{passive:true});
+document.addEventListener('mouseup',function(){dd.on=false;});
+document.addEventListener('touchend',function(){dd.on=false;});
+
+// 拖动调整大小
+var rd={};
+grip.addEventListener('mousedown',function(e){var r=canvas.getBoundingClientRect();rd={on:true,x:e.clientX,y:e.clientY,w:r.width,h:r.height};e.preventDefault();e.stopPropagation();});
+document.addEventListener('mousemove',function(e){
+  if(!rd.on)return;
+  var nw=Math.max(200,rd.w+(e.clientX-rd.x));
+  var nh=Math.max(40,rd.h+(e.clientY-rd.y));
+  canvas.style.width=nw+'px';canvas.style.height=nh+'px';
+  canvas.width=nw|0;canvas.height=nh|0;
+  syncGrip();
+});
+document.addEventListener('mouseup',function(){rd.on=false;});
+
+// ── 控制面板 ──
+panel=document.createElement('div');
+panel.style.cssText='position:fixed;top:60px;right:16px;z-index:2147483647;background:#161b22;color:#c9d1d9;padding:14px 16px;border-radius:10px;font:13px Arial,sans-serif;width:210px;box-shadow:0 4px 24px rgba(0,0,0,0.7);border:1px solid #30363d;user-select:none;';
+
+// 标题行（含最小化按钮）
+var titleRow=document.createElement('div');
+titleRow.style.cssText='display:flex;align-items:center;justify-content:space-between;margin-bottom:6px;cursor:move;';
+var titleDiv=document.createElement('div');
+titleDiv.textContent='YouTube\u5b57\u5e55\u5ef6\u8fdf';
+titleDiv.style.cssText='font-weight:bold;color:#ff4444;font-size:13px;';
+var minBtn=document.createElement('button');
+minBtn.textContent='\u2212';
+minBtn.title='Minimize';
+minBtn.style.cssText='background:none;border:1px solid #30363d;color:#6e7681;border-radius:3px;width:16px;height:16px;line-height:1;font-size:12px;cursor:pointer;padding:0;flex-shrink:0;';
+titleRow.appendChild(titleDiv);titleRow.appendChild(minBtn);
+panel.appendChild(titleRow);
+
+var statusEl=document.createElement('div');
+statusEl.textContent='Searching for captions...';
+statusEl.style.cssText='font-size:11px;color:#d29922;margin-bottom:10px;min-height:20px;line-height:1.6;';
+panel.appendChild(statusEl);
+
+// 可折叠区域
+var collapsible=document.createElement('div');
+var labelRow=document.createElement('label');
+labelRow.style.cssText='font-size:12px;color:#c9d1d9;';
+labelRow.textContent='Delay: ';
+var labelVal=document.createElement('b');
+labelVal.textContent='3.0s';labelVal.style.color='#58a6ff';
+labelRow.appendChild(labelVal);collapsible.appendChild(labelRow);
+var slider=document.createElement('input');
+slider.type='range';slider.min='0.5';slider.max='15';slider.step='0.5';slider.value='3';
+slider.style.cssText='width:100%;margin:5px 0;accent-color:#58a6ff;';
+collapsible.appendChild(slider);
+var tipEl=document.createElement('div');
+tipEl.textContent='\u62d6\u84dd\u6846\u5230\u5b57\u5e55\u533a\uff0c\u53f3\u4e0b\u89d2\u25e2\u8c03\u5927\u5c0f\u3002';
+tipEl.style.cssText='font-size:11px;color:#6e7681;margin:6px 0 10px;';
+collapsible.appendChild(tipEl);
+var closeBtn=document.createElement('button');
+closeBtn.textContent='Close';
+closeBtn.style.cssText='width:100%;padding:5px;background:#ff4757;border:none;color:#fff;border-radius:4px;cursor:pointer;font-size:12px;';
+collapsible.appendChild(closeBtn);
+panel.appendChild(collapsible);
+document.body.appendChild(panel);
+
+// 最小化逻辑
+var _minimized=false;
+minBtn.addEventListener('click',function(e){
+  e.stopPropagation();
+  _minimized=!_minimized;
+  collapsible.style.display=_minimized?'none':'';
+  statusEl.style.marginBottom=_minimized?'0':'10px';
+  minBtn.textContent=_minimized?'\u002b':'\u2212';
+});
+
+slider.addEventListener('input',function(e){DELAY=parseFloat(e.target.value)*1000;labelVal.textContent=parseFloat(e.target.value).toFixed(1)+'s';});
+closeBtn.addEventListener('click',function(){window.__YCD&&window.__YCD.destroy();});
+var pd={};
+panel.addEventListener('mousedown',function(e){if(e.target===slider||e.target===closeBtn||e.target===minBtn)return;var r=panel.getBoundingClientRect();pd={on:true,ox:e.clientX-r.left,oy:e.clientY-r.top};});
+document.addEventListener('mousemove',function(e){if(!pd.on)return;panel.style.left=(e.clientX-pd.ox)+'px';panel.style.top=(e.clientY-pd.oy)+'px';panel.style.right='auto';});
+document.addEventListener('mouseup',function(){pd.on=false;});
+
+function setStatus(msg,color){statusEl.textContent=msg;statusEl.style.color=color||'#3fb950';}
+
+function trimBuf(){
+  var cut=Date.now()-Math.max(DELAY*3,30000);
+  while(BUF.length>1&&BUF[0].ts<cut)BUF.shift();
+}
+
+// ── 文字换行：超出 maxWidth 时按空格折行 ──
+function wrapLine(text,maxWidth){
+  var words=text.split(' ');
+  var result=[],cur='';
+  words.forEach(function(w){
+    var test=cur?cur+' '+w:w;
+    if(ctx.measureText(test).width>maxWidth&&cur){
+      result.push(cur);cur=w;
+    }else{cur=test;}
+  });
+  if(cur)result.push(cur);
+  return result.length?result:[text];
+}
+
+// ── Canvas 绘制：白字 + 纯黑底，支持换行 ──
+function drawLines(lines){
+  var w=canvas.width,h=canvas.height;
+  ctx.clearRect(0,0,w,h);
+  if(!lines||lines.length===0)return;
+  var padX=10,padY=6;
+  var fSize=Math.min(fontSize,Math.max(10,Math.floor((h-padY*2)/lines.length)-padY));
+  ctx.font='bold '+fSize+'px '+fontFamily;
+  ctx.textBaseline='middle';
+  // 先把每行做 word wrap，得到最终视觉行列表
+  var visual=[];
+  lines.forEach(function(line){
+    wrapLine(line,w-padX*2).forEach(function(l){visual.push(l);});
+  });
+  var lineH=Math.round(h/visual.length);
+  visual.forEach(function(line,i){
+    var tw=ctx.measureText(line).width;
+    var x=Math.max(padX,(w-tw)/2);
+    var y=lineH*i+lineH/2;
+    ctx.fillStyle='#000';
+    ctx.fillRect(x-padX,y-fSize/2-padY/2,tw+padX*2,fSize+padY);
+    ctx.fillStyle='#fff';
+    ctx.fillText(line,x,y);
+  });
+}
+
+// ── 启动字幕监听 ──
+function startDelay(){
+  captionRoot=document.querySelector('.ytp-caption-window-container');
+  if(!captionRoot){
+    setStatus('No captions found. Enable YouTube captions first.','#ff4757');
+    var waitMo=new MutationObserver(function(){
+      if(document.querySelector('.ytp-caption-window-container')){waitMo.disconnect();startDelay();}
+    });
+    waitMo.observe(document.body,{childList:true,subtree:true});
+    _pendingWaitMo=waitMo;
+    return;
+  }
+
+  // 读字幕字体（用于 canvas 字号与原版一致）
+  setTimeout(function(){
+    var seg=captionRoot.querySelector('.ytp-caption-segment');
+    if(seg){
+      var cs=window.getComputedStyle(seg);
+      var fs=parseFloat(cs.fontSize);
+      if(fs>0)fontSize=Math.round(fs);
+      fontFamily=cs.fontFamily||fontFamily;
+    }
+  },300);
+
+  // 不隐藏真实字幕！opacity:0 会让 YouTube 停止更新字幕 DOM。
+  // 用户把黑色 canvas 盖在字幕区域上，canvas 的黑色背景自然遮住下面的真实字幕。
+
+  // 提取字幕文本
+  // 英文+中文在同一 .ytp-caption-window 内，按 .ytp-caption-linewrap 分行
+  // 每个 linewrap = 一行视觉文字（英文一行，中文一行）
+  function lineText(el){
+    var segs=el.querySelectorAll('.ytp-caption-segment');
+    if(segs.length){
+      return Array.prototype.map.call(segs,function(s){return s.textContent;})
+        .join(' ').replace(/\s{2,}/g,' ').trim();
+    }
+    return el.textContent.replace(/\s+/g,' ').trim();
+  }
+
+  function getLines(){
+    var lines=[],seen={};
+    // 优先：按 linewrap 分行（捕获同一 window 内的双语）
+    var wraps=document.querySelectorAll('.ytp-caption-linewrap');
+    wraps.forEach(function(lw){
+      var t=lineText(lw);
+      if(t&&!seen[t]){seen[t]=1;lines.push(t);}
+    });
+    if(lines.length)return lines;
+    // 次选：按 window 分行
+    var wins=document.querySelectorAll('.ytp-caption-window');
+    wins.forEach(function(w){
+      var t=lineText(w);
+      if(t&&!seen[t]){seen[t]=1;lines.push(t);}
+    });
+    if(lines.length)return lines;
+    // 兜底：captionRoot 全部 segment
+    var segs=captionRoot.querySelectorAll('.ytp-caption-segment');
+    if(segs.length){
+      var t=Array.prototype.map.call(segs,function(s){return s.textContent;})
+        .join(' ').replace(/\s{2,}/g,' ').trim();
+      if(t)return[t];
+    }
+    return[];
+  }
+
+  // 当前字幕文本（MO 用于检测变化）
+  var _curText='';
+
+  // 采样函数：每次都入 BUF（保持帧数增长），MO 额外做去重更新 _curText
+  function sample(){
+    if(!run)return;
+    var lines=getLines();
+    var text=lines.join('|');
+    _curText=text;
+    BUF.push({lines:lines,text:text,ts:Date.now()});
+    trimBuf();
+  }
+
+  // MutationObserver（监听节点增删和文本变化）
+  mo=new MutationObserver(sample);
+  mo.observe(captionRoot,{childList:true,subtree:true,characterData:true,attributes:false});
+
+  // 100ms 轮询（约 300 帧/30s，与 liu 版风格一致）
+  pollTimer=setInterval(sample,100);
+
+  // 初始快照
+  sample();
+
+  // ── 渲染循环 ──
+  var lastText='';
+  function renderLoop(){
+    if(!run)return;
+    rafId=requestAnimationFrame(renderLoop);
+    var targetTs=Date.now()-DELAY,frame=null;
+    for(var i=0;i<BUF.length;i++){if(BUF[i].ts<=targetTs)frame=BUF[i];else break;}
+    if(frame){
+      if(frame.text!==lastText){drawLines(frame.lines);lastText=frame.text;}
+    }else if(BUF.length>0){
+      ctx.fillStyle='#000';ctx.fillRect(0,0,canvas.width,canvas.height);
+      ctx.fillStyle='#555';ctx.font='13px Arial';ctx.textBaseline='middle';
+      var rem=Math.max(0,Math.ceil((DELAY-(Date.now()-BUF[0].ts))/1000));
+      ctx.fillText('Warming up... '+rem+'s',12,canvas.height/2);
+    }
+    setStatus('Active: '+BUF.length+' frames | '+(DELAY/1000).toFixed(1)+'s delay','#3fb950');
+  }
+  renderLoop();
+}
+
+// ── 全屏支持 ──
+function getRoot(){return document.fullscreenElement||document.webkitFullscreenElement||document.body;}
+function moveToRoot(){
+  var root=getRoot();
+  [canvas,grip,panel].forEach(function(el){if(el&&el.parentNode!==root)root.appendChild(el);});
+  syncGrip();
+  // 全屏切换后重新读字幕字号（全屏下 YouTube 会放大字体）
+  setTimeout(function(){
+    var seg=document.querySelector('.ytp-caption-segment');
+    if(seg){
+      var cs=window.getComputedStyle(seg);
+      var fs=parseFloat(cs.fontSize);
+      if(fs>0)fontSize=Math.round(fs);
+      fontFamily=cs.fontFamily||fontFamily;
+    }
+  },400);
+}
+document.addEventListener('fullscreenchange',moveToRoot);
+document.addEventListener('webkitfullscreenchange',moveToRoot);
+
+startDelay();
+
+window.__YCD={
+  active:true,
+  destroy:function(){
+    run=false;
+    if(rafId)cancelAnimationFrame(rafId);
+    if(mo)mo.disconnect();
+    if(pollTimer)clearInterval(pollTimer);
+    if(_pendingWaitMo){_pendingWaitMo.disconnect();_pendingWaitMo=null;}
+    document.removeEventListener('fullscreenchange',moveToRoot);
+    document.removeEventListener('webkitfullscreenchange',moveToRoot);
+    [canvas,grip,panel].forEach(function(el){if(el&&el.parentNode)el.parentNode.removeChild(el);});
+    window.__YCD=null;
+  }
+};
+
+}catch(err){alert('YouTube \u5b57\u5e55\u5ef6\u8fdf\u5668 \u9519\u8bef:\n'+err.message+'\n\n'+err.stack);}
+})()
+</script>
+
+<script>
+function getCode(){
+  var raw=document.getElementById('bm-src').textContent;
+  return raw.replace(/\/\/[^\n]*/g,'').replace(/\n/g,' ').replace(/\s{2,}/g,' ').trim();
+}
+function getHref(){return 'javascript:('+getCode()+')';}
+document.getElementById('bm-link').href=getHref();
+document.getElementById('url-box').value=getHref();
+function copyUrl(){
+  var box=document.getElementById('url-box');box.select();document.execCommand('copy');
+  var btn=document.querySelector('.copy-btn');btn.textContent='\u5df2\u590d\u5236!';
+  setTimeout(function(){btn.textContent='\u590d\u5236 URL';},2000);
+}
+document.getElementById('test-btn').addEventListener('click',function(){new Function(getCode())();});
+</script>
+</body>
+</html>
